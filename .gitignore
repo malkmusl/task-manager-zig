@@ -1,2 +1,6 @@
-./.zig-cache/
-./zig-out
+# Zig build cache
+.zig-cache/
+
+# Zig output binaries
+zig-out/
+
