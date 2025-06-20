@@ -14,10 +14,12 @@ pub const VulkanWindow = struct {
     swapchain: c.VkSwapchainKHR,
     swapchain_format: c.VkFormat,
     swapchain_extent: c.VkExtent2D,
-    framebuffer: c.VkFramebuffer,
-    image_view: c.VkImageView,
+
+    image_views: []c.VkImageView,
+    framebuffers: []c.VkFramebuffer,
     command_pool: c.VkCommandPool,
-    command_buffer: c.VkCommandBuffer,
+    command_buffers: []c.VkCommandBuffer,
+    image_count: u32,
     current_image_index: u32,
 
     pub fn init(ctx: *VulkanContext, rp: *RenderPass, width: u32, height: u32, title: [*:0]const u8) !VulkanWindow {
@@ -31,27 +33,22 @@ pub const VulkanWindow = struct {
         if (c.glfwCreateWindowSurface(ctx.instance, handle, null, &surface) != c.VK_SUCCESS)
             return error.SurfaceCreationFailed;
 
-        // Check surface support
         var surface_supported: c.VkBool32 = undefined;
         _ = c.vkGetPhysicalDeviceSurfaceSupportKHR(ctx.physical_device, ctx.graphics_queue_index, surface, &surface_supported);
         if (surface_supported == c.VK_FALSE) {
             return error.SurfaceNotSupported;
         }
 
-        // Get surface capabilities
         var surface_caps: c.VkSurfaceCapabilitiesKHR = undefined;
         _ = c.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(ctx.physical_device, surface, &surface_caps);
 
-        // Swapchain format
         const format = c.VK_FORMAT_B8G8R8A8_SRGB;
 
-        // Use surface extent if available, otherwise use provided dimensions
         const extent = if (surface_caps.currentExtent.width != 0xFFFFFFFF) 
             surface_caps.currentExtent 
         else 
             c.VkExtent2D{ .width = width, .height = height };
 
-        // Create swapchain with proper image count
         const image_count = if (surface_caps.maxImageCount > 0 and surface_caps.minImageCount + 1 > surface_caps.maxImageCount)
             surface_caps.maxImageCount
         else
@@ -82,63 +79,60 @@ pub const VulkanWindow = struct {
         if (c.vkCreateSwapchainKHR(ctx.device, &sc_info, null, &swapchain) != c.VK_SUCCESS)
             return error.SwapchainCreationFailed;
 
-        // Get swapchain images
         var actual_image_count: u32 = 0;
         _ = c.vkGetSwapchainImagesKHR(ctx.device, swapchain, &actual_image_count, null);
-        
+
         const images = try std.heap.page_allocator.alloc(c.VkImage, actual_image_count);
         defer std.heap.page_allocator.free(images);
-        
+
         _ = c.vkGetSwapchainImagesKHR(ctx.device, swapchain, &actual_image_count, images.ptr);
-        
-        // Use the first image
-        const image = images[0];
 
-        // Image view
-        const view_info = c.VkImageViewCreateInfo{
-            .sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-            .image = image,
-            .viewType = c.VK_IMAGE_VIEW_TYPE_2D,
-            .format = format,
-            .components = .{
-                .r = c.VK_COMPONENT_SWIZZLE_IDENTITY,
-                .g = c.VK_COMPONENT_SWIZZLE_IDENTITY,
-                .b = c.VK_COMPONENT_SWIZZLE_IDENTITY,
-                .a = c.VK_COMPONENT_SWIZZLE_IDENTITY,
-            },
-            .subresourceRange = .{
-                .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
-                .baseMipLevel = 0,
-                .levelCount = 1,
-                .baseArrayLayer = 0,
-                .layerCount = 1,
-            },
-            .flags = 0,
-            .pNext = null,
-        };
+        // Image Views + Framebuffers arrays
+        const image_views = try std.heap.page_allocator.alloc(c.VkImageView, actual_image_count);
+        const framebuffers = try std.heap.page_allocator.alloc(c.VkFramebuffer, actual_image_count);
 
-        var image_view: c.VkImageView = undefined;
-        if (c.vkCreateImageView(ctx.device, &view_info, null, &image_view) != c.VK_SUCCESS)
-            return error.ImageViewCreationFailed;
+        for (images[0..actual_image_count], 0..) |image, i| {
+            const view_info = c.VkImageViewCreateInfo{
+                .sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                .image = image,
+                .viewType = c.VK_IMAGE_VIEW_TYPE_2D,
+                .format = format,
+                .components = .{
+                    .r = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+                    .g = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+                    .b = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+                    .a = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+                },
+                .subresourceRange = .{
+                    .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+                    .baseMipLevel = 0,
+                    .levelCount = 1,
+                    .baseArrayLayer = 0,
+                    .layerCount = 1,
+                },
+                .flags = 0,
+                .pNext = null,
+            };
 
-        // Create framebuffer
-        const fb_info = c.VkFramebufferCreateInfo{
-            .sType = c.VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-            .renderPass = rp.render_pass,
-            .attachmentCount = 1,
-            .pAttachments = &image_view,
-            .width = extent.width,
-            .height = extent.height,
-            .layers = 1,
-            .pNext = null,
-            .flags = 0,
-        };
+            if (c.vkCreateImageView(ctx.device, &view_info, null, &image_views[i]) != c.VK_SUCCESS)
+                return error.ImageViewCreationFailed;
 
-        var framebuffer: c.VkFramebuffer = undefined;
-        if (c.vkCreateFramebuffer(ctx.device, &fb_info, null, &framebuffer) != c.VK_SUCCESS)
-            return error.FramebufferCreationFailed;
+            const fb_info = c.VkFramebufferCreateInfo{
+                .sType = c.VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+                .renderPass = rp.render_pass,
+                .attachmentCount = 1,
+                .pAttachments = &image_views[i],
+                .width = extent.width,
+                .height = extent.height,
+                .layers = 1,
+                .pNext = null,
+                .flags = 0,
+            };
 
-        // Command pool + buffer
+            if (c.vkCreateFramebuffer(ctx.device, &fb_info, null, &framebuffers[i]) != c.VK_SUCCESS)
+                return error.FramebufferCreationFailed;
+        }
+
         const pool_info = c.VkCommandPoolCreateInfo{
             .sType = c.VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
             .queueFamilyIndex = ctx.graphics_queue_index,
@@ -150,77 +144,59 @@ pub const VulkanWindow = struct {
         if (c.vkCreateCommandPool(ctx.device, &pool_info, null, &command_pool) != c.VK_SUCCESS)
             return error.CommandPoolCreationFailed;
 
+        const command_buffers = try std.heap.page_allocator.alloc(c.VkCommandBuffer, actual_image_count);
+
         const alloc_info = c.VkCommandBufferAllocateInfo{
             .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
             .commandPool = command_pool,
             .level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-            .commandBufferCount = 1,
+            .commandBufferCount = actual_image_count,
             .pNext = null,
         };
 
-        var command_buffer: c.VkCommandBuffer = undefined;
-        if (c.vkAllocateCommandBuffers(ctx.device, &alloc_info, &command_buffer) != c.VK_SUCCESS)
+        if (c.vkAllocateCommandBuffers(ctx.device, &alloc_info, command_buffers.ptr) != c.VK_SUCCESS)
             return error.CommandBufferAllocationFailed;
 
         return VulkanWindow{
-            .handle = handle orelse return error.WindowCreationFailed,
+            .handle = handle,
             .surface = surface,
             .swapchain = swapchain,
             .swapchain_format = format,
             .swapchain_extent = extent,
-            .framebuffer = framebuffer,
-            .image_view = image_view,
+            .image_views = image_views,
+            .framebuffers = framebuffers,
             .command_pool = command_pool,
-            .command_buffer = command_buffer,
+            .command_buffers = command_buffers,
+            .image_count = actual_image_count,
             .current_image_index = 0,
         };
-    }
-
-    pub fn deinit(self: *VulkanWindow, ctx: *VulkanContext) void {
-        c.vkDestroyCommandPool(ctx.device, self.command_pool, null);
-        c.vkDestroyFramebuffer(ctx.device, self.framebuffer, null);
-        c.vkDestroyImageView(ctx.device, self.image_view, null);
-        c.vkDestroySwapchainKHR(ctx.device, self.swapchain, null);
-        c.vkDestroySurfaceKHR(ctx.instance, self.surface, null);
-        c.glfwDestroyWindow(self.handle);
     }
 
     pub fn drawFrame(self: *VulkanWindow, ctx: *VulkanContext, rp: *RenderPass, sync: *SyncObjects) !void {
         _ = c.vkWaitForFences(ctx.device, 1, &sync.in_flight_fence, c.VK_TRUE, 1_000_000_000);
         _ = c.vkResetFences(ctx.device, 1, &sync.in_flight_fence);
 
-        // Acquire next image
         var image_index: u32 = undefined;
-        const acquire_result = c.vkAcquireNextImageKHR(
-            ctx.device, 
-            self.swapchain, 
-            1_000_000_000, // timeout
-            sync.image_available, 
-            null, // fence
-            &image_index
-        );
-        
-        if (acquire_result != c.VK_SUCCESS) {
-            return error.ImageAcquireFailed;
-        }
+        const acquire_result = c.vkAcquireNextImageKHR(ctx.device, self.swapchain, 1_000_000_000, sync.image_available, null, &image_index);
+        if (acquire_result != c.VK_SUCCESS) return error.ImageAcquireFailed;
 
         self.current_image_index = image_index;
+        const command_buffer = self.command_buffers[image_index];
 
-        // Record command buffer
         const begin_info = c.VkCommandBufferBeginInfo{
             .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
             .flags = c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
             .pNext = null,
             .pInheritanceInfo = null,
         };
-        _ = c.vkBeginCommandBuffer(self.command_buffer, &begin_info);
+        _ = c.vkBeginCommandBuffer(command_buffer, &begin_info);
 
         const clear_color = c.VkClearValue{ .color = .{ .float32 = .{ 0.0, 0.0, 0.0, 1.0 } } };
 
         const rp_begin = c.VkRenderPassBeginInfo{
             .sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
             .renderPass = rp.render_pass,
-            .framebuffer = self.framebuffer,
+            .framebuffer = self.framebuffers[image_index],
             .renderArea = .{
                 .offset = .{ .x = 0, .y = 0 },
                 .extent = self.swapchain_extent,
@@ -230,12 +206,10 @@ pub const VulkanWindow = struct {
             .pNext = null,
         };
 
-        c.vkCmdBeginRenderPass(self.command_buffer, &rp_begin, c.VK_SUBPASS_CONTENTS_INLINE);
-        // No pipeline for now - just clearing to dark gray
-        c.vkCmdEndRenderPass(self.command_buffer);
-        _ = c.vkEndCommandBuffer(self.command_buffer);
+        c.vkCmdBeginRenderPass(command_buffer, &rp_begin, c.VK_SUBPASS_CONTENTS_INLINE);
+        c.vkCmdEndRenderPass(command_buffer);
+        _ = c.vkEndCommandBuffer(command_buffer);
 
-        // Submit
         const wait_stages: u32 = @intCast(c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
 
         const submit_info = c.VkSubmitInfo{
@@ -244,17 +218,15 @@ pub const VulkanWindow = struct {
             .pWaitSemaphores = &sync.image_available,
             .pWaitDstStageMask = &wait_stages,
             .commandBufferCount = 1,
-            .pCommandBuffers = &self.command_buffer,
+            .pCommandBuffers = &command_buffer,
             .signalSemaphoreCount = 1,
             .pSignalSemaphores = &sync.render_finished,
             .pNext = null,
         };
 
-        if (c.vkQueueSubmit(ctx.graphics_queue, 1, &submit_info, sync.in_flight_fence) != c.VK_SUCCESS) {
+        if (c.vkQueueSubmit(ctx.graphics_queue, 1, &submit_info, sync.in_flight_fence) != c.VK_SUCCESS)
             return error.QueueSubmitFailed;
-        }
 
-        // Present the frame!
         const present_info = c.VkPresentInfoKHR{
             .sType = c.VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
             .waitSemaphoreCount = 1,
@@ -267,8 +239,6 @@ pub const VulkanWindow = struct {
         };
 
         const present_result = c.vkQueuePresentKHR(ctx.graphics_queue, &present_info);
-        if (present_result != c.VK_SUCCESS) {
-            return error.PresentFailed;
-        }
+        if (present_result != c.VK_SUCCESS) return error.PresentFailed;
     }
 };
